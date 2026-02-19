@@ -30,24 +30,32 @@ async function startServer() {
   // Register Entry
   app.post("/api/entry", (req, res) => {
     const { plate } = req.body;
-    const existing = db.prepare("SELECT * FROM logs WHERE plate = ? AND status = 'parked'").get();
+    if (!plate) {
+      return res.status(400).json({ error: "La placa es requerida" });
+    }
+    
+    const existing = db.prepare("SELECT * FROM logs WHERE plate = ? AND status = 'parked'").get(plate);
     if (existing) {
       return res.status(400).json({ error: "Vehículo ya se encuentra en el parqueadero" });
     }
 
     const info = db.prepare("INSERT INTO logs (plate) VALUES (?)").run(plate);
-    res.json({ id: info.lastInsertRowid });
+    res.json({ id: info.lastInsertRowid, success: true });
   });
 
   // Register Exit
   app.post("/api/exit", (req, res) => {
     const { plate } = req.body;
+    if (!plate) {
+      return res.status(400).json({ error: "La placa es requerida" });
+    }
+    
     const info = db.prepare(
       "UPDATE logs SET exit_time = CURRENT_TIMESTAMP, status = 'exited' WHERE plate = ? AND status = 'parked'"
     ).run(plate);
     
     if (info.changes === 0) {
-      return res.status(404).json({ error: "Vehículo no encontrado" });
+      return res.status(404).json({ error: "Vehículo no encontrado o ya ha salido" });
     }
     res.json({ success: true });
   });
