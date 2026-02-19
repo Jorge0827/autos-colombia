@@ -1,0 +1,5 @@
+{
+  "name": "Autos Colombia - Gestión de Parqueadero",
+  "description": "Sistema de gestión para el parqueadero Autos Colombia, permitiendo el registro de entradas, salidas y control de mensualidades.",
+  "requestFramePermissions": []
+}
