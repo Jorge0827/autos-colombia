@@ -20,9 +20,39 @@ import { motion, AnimatePresence } from 'motion/react';
 interface Log {
   id: number;
   plate: string;
+  vehicle_type?: string;
   entry_time: string;
   exit_time: string | null;
   status: string;
+  paid_amount?: number | null;
+  payment_method?: string | null;
+}
+
+interface PaymentQuote {
+  log_id: number;
+  plate: string;
+  vehicle_type: string;
+  entry_time: string;
+  exit_attempt_time: string;
+  parked_minutes: number;
+  hourly_rate: number;
+  fraction_minutes: number;
+  amount: number;
+  has_monthly: boolean;
+  monthly_fee: number | null;
+  monthly_end_date: string | null;
+}
+
+interface PaymentReceipt {
+  id: number;
+  plate: string;
+  vehicle_type: string;
+  parked_minutes?: number;
+  amount: number;
+  payment_method: string;
+  reference: string;
+  created_at?: string;
+  paid_at?: string;
 }
 
 interface User {
@@ -45,15 +75,40 @@ interface Cell {
   created_at: string;
 }
 
+interface Subscription {
+  id: number;
+  user_id: number;
+  user_name: string;
+  plate: string;
+  vehicle_type: string;
+  monthly_fee: number;
+  start_date: string;
+  end_date: string;
+  status: string;
+  created_at: string;
+  cell_code?: string | null;
+  cell_status?: string | null;
+  days_remaining?: number | null;
+  payment_reference?: string | null;
+  payment_date?: string | null;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'users' | 'cells'>('dashboard');
   const [parkedVehicles, setParkedVehicles] = useState<Log[]>([]);
   const [history, setHistory] = useState<Log[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [cells, setCells] = useState<Cell[]>([]);
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState(true);
   const [plateInput, setPlateInput] = useState('');
+  const [entryVehicleType, setEntryVehicleType] = useState<'carro' | 'moto' | 'bicicleta'>('carro');
   const [plateExitInput, setPlateExitInput] = useState('');
+  const [exitPaymentMethod, setExitPaymentMethod] = useState<'efectivo' | 'tarjeta' | 'transferencia' | 'qr'>('efectivo');
+  const [paymentQuote, setPaymentQuote] = useState<PaymentQuote | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [receiptModal, setReceiptModal] = useState<PaymentReceipt | null>(null);
 
   // Form state: usuarios
   const [userForm, setUserForm] = useState({ name: '', email: '', plate: '', role: 'usuario' });
@@ -65,6 +120,20 @@ export default function App() {
   const [assigningUserId, setAssigningUserId] = useState<number | null>(null);
   const [assignCellId, setAssignCellId] = useState<string>('');
   const [userSearchInput, setUserSearchInput] = useState('');
+  const [monthlyForm, setMonthlyForm] = useState<{ plate: string; vehicle_type: 'carro' | 'moto' | 'bicicleta' }>({
+    plate: '',
+    vehicle_type: 'carro',
+  });
+  const [monthlyPaymentMethod, setMonthlyPaymentMethod] = useState<'efectivo' | 'tarjeta' | 'transferencia' | 'qr'>('efectivo');
+  const [subscriptionSearch, setSubscriptionSearch] = useState('');
+  const [onlyActiveSubscriptions, setOnlyActiveSubscriptions] = useState(true);
+
+  const formatCop = (value: number) =>
+    new Intl.NumberFormat('es-CO', {
+      style: 'currency',
+      currency: 'COP',
+      maximumFractionDigits: 0,
+    }).format(value || 0);
 
   const fetchData = async () => {
     try {
@@ -106,14 +175,53 @@ export default function App() {
     }
   };
 
+  const fetchSubscriptions = async () => {
+    try {
+      const res = await fetch('/api/subscriptions');
+      const data = await res.json();
+      setSubscriptions(res.ok && Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Error fetching subscriptions:', error);
+      setSubscriptions([]);
+    }
+  };
+
   useEffect(() => {
     fetchData();
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'users') fetchUsers('');
+    if (activeTab === 'users') {
+      fetchUsers('');
+      fetchSubscriptions();
+      fetchCells();
+    }
     if (activeTab === 'cells') fetchCells();
   }, [activeTab]);
+
+  const activeSubscriptions = useMemo(
+    () => subscriptions.filter((s) => s.status === 'active' && (s.days_remaining == null || s.days_remaining >= 0)),
+    [subscriptions]
+  );
+
+  const subscriptionsExpiringSoon = useMemo(
+    () => activeSubscriptions.filter((s) => typeof s.days_remaining === 'number' && s.days_remaining <= 5),
+    [activeSubscriptions]
+  );
+
+  const occupiedCellsCount = useMemo(
+    () => cells.filter((c) => c.status === 'occupied').length,
+    [cells]
+  );
+
+  const filteredSubscriptions = useMemo(() => {
+    const q = subscriptionSearch.trim().toUpperCase();
+    return subscriptions.filter((s) => {
+      const activeOk = !onlyActiveSubscriptions || s.status === 'active';
+      const searchOk = !q || String(s.plate || '').toUpperCase().includes(q);
+      return activeOk && searchOk;
+    });
+  }, [subscriptions, subscriptionSearch, onlyActiveSubscriptions]);
 
   const filteredUsers = useMemo(() => {
     if (!Array.isArray(users)) return [];
@@ -135,11 +243,12 @@ export default function App() {
       const res = await fetch('/api/entry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plate: plateInput.toUpperCase() })
+        body: JSON.stringify({ plate: plateInput.toUpperCase(), vehicle_type: entryVehicleType })
       });
       
       if (res.ok) {
         setPlateInput('');
+        setEntryVehicleType('carro');
         fetchData();
       } else {
         const err = await res.json();
@@ -161,6 +270,7 @@ export default function App() {
       
       if (res.ok) {
         setPlateExitInput('');
+        setPaymentQuote(null);
         fetchData();
       } else {
         const err = await res.json();
@@ -168,6 +278,90 @@ export default function App() {
       }
     } catch (error) {
       console.error('Exit error:', error);
+    }
+  };
+
+  const handleQuote = async (plate: string) => {
+    const normalizedPlate = plate.trim().toUpperCase();
+    if (!normalizedPlate) return;
+    setQuoteLoading(true);
+    try {
+      const res = await fetch('/api/payments/quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plate: normalizedPlate })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setPlateExitInput(normalizedPlate);
+        setPaymentQuote(data);
+      } else {
+        alert(data.error || 'No fue posible calcular el pago');
+        setPaymentQuote(null);
+      }
+    } catch (error) {
+      console.error('Quote error:', error);
+      setPaymentQuote(null);
+    } finally {
+      setQuoteLoading(false);
+    }
+  };
+
+  const handlePayAndExit = async () => {
+    if (!paymentQuote) return;
+    setPaymentLoading(true);
+    try {
+      const payRes = await fetch('/api/payments/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plate: paymentQuote.plate, payment_method: exitPaymentMethod })
+      });
+      const payData = await payRes.json();
+      if (!payRes.ok) {
+        alert(payData.error || 'No fue posible procesar el pago');
+        return;
+      }
+      if (payData.payment) {
+        setReceiptModal(payData.payment as PaymentReceipt);
+      }
+      await handleExit(paymentQuote.plate);
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('No fue posible procesar el pago');
+    } finally {
+      setPaymentLoading(false);
+    }
+  };
+
+  const handleActivateMonthly = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!monthlyForm.plate.trim()) return;
+    try {
+      const res = await fetch('/api/subscriptions/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          plate: monthlyForm.plate.toUpperCase(),
+          vehicle_type: monthlyForm.vehicle_type,
+          payment_method: monthlyPaymentMethod,
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert(`Mensualidad activada. Valor: ${formatCop(data.subscription?.monthly_fee || 0)}`);
+        setMonthlyForm({ plate: '', vehicle_type: 'carro' });
+        setMonthlyPaymentMethod('efectivo');
+        if (data.payment) {
+          setReceiptModal(data.payment as PaymentReceipt);
+        }
+        fetchSubscriptions();
+        fetchUsers();
+      } else {
+        alert(data.error || 'No fue posible activar la mensualidad');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('No fue posible activar la mensualidad');
     }
   };
 
@@ -403,6 +597,18 @@ export default function App() {
                         className="w-full bg-[#F0F4F8] border-none rounded-2xl pl-12 pr-4 py-4 focus:ring-2 focus:ring-emerald-200 outline-none transition-all uppercase font-mono font-black text-xl text-[#243B53] placeholder:text-[#BCCCDC] placeholder:font-sans placeholder:font-normal placeholder:text-sm"
                       />
                     </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold mb-2">Tipo de vehículo</label>
+                      <select
+                        value={entryVehicleType}
+                        onChange={(e) => setEntryVehicleType(e.target.value as 'carro' | 'moto' | 'bicicleta')}
+                        className="w-full bg-[#F0F4F8] border-none rounded-2xl px-4 py-3 focus:ring-2 focus:ring-emerald-200 outline-none text-[#243B53]"
+                      >
+                        <option value="carro">Carro</option>
+                        <option value="moto">Moto</option>
+                        <option value="bicicleta">Bicicleta</option>
+                      </select>
+                    </div>
                     <button 
                       type="submit"
                       className="w-full bg-[#486581] text-white py-4 rounded-2xl font-bold hover:bg-[#334E68] transition-all shadow-md shadow-blue-900/10 flex items-center justify-center gap-2"
@@ -424,7 +630,7 @@ export default function App() {
                     </div>
                   </div>
                   
-                  <form onSubmit={(e) => { e.preventDefault(); handleExit(plateExitInput); }} className="space-y-4">
+                  <form onSubmit={(e) => { e.preventDefault(); handleQuote(plateExitInput); }} className="space-y-4">
                     <div className="relative">
                       <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[#BCCCDC]" size={18} />
                       <input 
@@ -440,9 +646,58 @@ export default function App() {
                       className="w-full bg-red-500 text-white py-4 rounded-2xl font-bold hover:bg-red-600 transition-all shadow-md shadow-red-900/10 flex items-center justify-center gap-2"
                     >
                       <LogOut size={20} />
-                      Confirmar Salida
+                      {quoteLoading ? 'Calculando...' : 'Calcular Pago'}
                     </button>
                   </form>
+
+                  {paymentQuote && (
+                    <div className="bg-[#F0F4F8] rounded-2xl p-4 space-y-3 border border-blue-100">
+                      <div className="flex justify-between text-sm text-[#486581]">
+                        <span>Placa</span>
+                        <span className="font-mono font-bold text-[#243B53]">{paymentQuote.plate}</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-[#486581]">
+                        <span>Tipo</span>
+                        <span className="font-semibold text-[#243B53] capitalize">{paymentQuote.vehicle_type}</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-[#486581]">
+                        <span>Tiempo parqueado</span>
+                        <span className="font-semibold text-[#243B53]">{paymentQuote.parked_minutes} min</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-[#486581]">
+                        <span>Total a pagar</span>
+                        <span className="font-black text-[#102A43]">{formatCop(paymentQuote.amount)}</span>
+                      </div>
+                      {paymentQuote.has_monthly && (
+                        <div className="text-xs bg-emerald-50 text-emerald-700 rounded-xl p-3 font-semibold">
+                          Mensualidad activa. La salida se registrará sin cobro adicional.
+                        </div>
+                      )}
+                      {!paymentQuote.has_monthly && (
+                        <div>
+                          <label className="block text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold mb-2">Método de pago</label>
+                          <select
+                            value={exitPaymentMethod}
+                            onChange={(e) => setExitPaymentMethod(e.target.value as 'efectivo' | 'tarjeta' | 'transferencia' | 'qr')}
+                            className="w-full bg-white border border-blue-100 rounded-2xl px-4 py-3 focus:ring-2 focus:ring-red-100 outline-none text-[#243B53]"
+                          >
+                            <option value="efectivo">Efectivo</option>
+                            <option value="tarjeta">Tarjeta</option>
+                            <option value="transferencia">Transferencia</option>
+                            <option value="qr">QR</option>
+                          </select>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handlePayAndExit}
+                        disabled={paymentLoading}
+                        className="w-full bg-[#486581] text-white py-3 rounded-2xl font-bold hover:bg-[#334E68] transition-all disabled:opacity-60"
+                      >
+                        {paymentLoading ? 'Procesando...' : paymentQuote.has_monthly ? 'Registrar salida' : 'Pagar y registrar salida'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -463,6 +718,9 @@ export default function App() {
                       
                       <div className="mb-8">
                         <span className="text-3xl font-mono font-black text-[#102A43] tracking-tighter">{vehicle.plate}</span>
+                        <div className="mt-2">
+                          <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase">{vehicle.vehicle_type || 'carro'}</span>
+                        </div>
                         <div className="flex items-center gap-2 text-sm text-[#829AB1] mt-2">
                           <Clock size={14} />
                           <span>Entró a las {new Date(vehicle.entry_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
@@ -470,11 +728,11 @@ export default function App() {
                       </div>
 
                       <button 
-                        onClick={() => handleExit(vehicle.plate)}
+                        onClick={() => handleQuote(vehicle.plate)}
                         className="w-full py-4 bg-[#F0F4F8] text-[#486581] hover:bg-red-500 hover:text-white rounded-2xl font-bold text-sm transition-all flex items-center justify-center gap-2 group-hover:shadow-inner"
                       >
                         <LogOut size={16} />
-                        Salida Rápida
+                        Cobrar y salir
                       </button>
                     </motion.div>
                   ))}
@@ -509,6 +767,8 @@ export default function App() {
                   <thead>
                     <tr className="bg-blue-50/50">
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Placa</th>
+                      <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Tipo</th>
+                      <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Valor pagado</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Entrada</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Salida</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Estado</th>
@@ -518,6 +778,8 @@ export default function App() {
                     {history.map((log) => (
                       <tr key={log.id} className="hover:bg-blue-50/30 transition-colors">
                         <td className="px-8 py-5 font-mono font-bold text-[#243B53]">{log.plate}</td>
+                        <td className="px-8 py-5 text-sm font-semibold capitalize text-[#486581]">{log.vehicle_type || 'carro'}</td>
+                        <td className="px-8 py-5 text-sm font-bold text-[#243B53]">{log.paid_amount != null ? formatCop(log.paid_amount) : '—'}</td>
                         <td className="px-8 py-5 text-sm text-[#486581]">{new Date(log.entry_time).toLocaleString()}</td>
                         <td className="px-8 py-5 text-sm text-[#486581]">
                           {log.exit_time ? new Date(log.exit_time).toLocaleString() : '—'}
@@ -592,6 +854,147 @@ export default function App() {
                     </button>
                   </div>
                 </form>
+              </div>
+
+              <div className="bg-white p-8 rounded-[2.5rem] border border-blue-100 shadow-sm space-y-6">
+                <div>
+                  <h3 className="text-lg font-bold text-[#243B53]">Activar mensualidad</h3>
+                  <p className="text-sm text-[#627D98] mt-1">Carro: 240000, Moto: 132000, Bicicleta: 60000 (30 días)</p>
+                </div>
+                <form onSubmit={handleActivateMonthly} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold mb-2">Placa registrada</label>
+                    <input
+                      type="text"
+                      value={monthlyForm.plate}
+                      onChange={(e) => setMonthlyForm((f) => ({ ...f, plate: e.target.value.toUpperCase() }))}
+                      placeholder="ABC-123"
+                      className="w-full bg-[#F0F4F8] border-none rounded-2xl px-4 py-3 focus:ring-2 focus:ring-blue-200 outline-none font-mono font-bold text-[#243B53] uppercase"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold mb-2">Tipo de vehículo</label>
+                    <select
+                      value={monthlyForm.vehicle_type}
+                      onChange={(e) => setMonthlyForm((f) => ({ ...f, vehicle_type: e.target.value as 'carro' | 'moto' | 'bicicleta' }))}
+                      className="w-full bg-[#F0F4F8] border-none rounded-2xl px-4 py-3 focus:ring-2 focus:ring-blue-200 outline-none text-[#243B53]"
+                    >
+                      <option value="carro">Carro</option>
+                      <option value="moto">Moto</option>
+                      <option value="bicicleta">Bicicleta</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold mb-2">Método de pago</label>
+                    <select
+                      value={monthlyPaymentMethod}
+                      onChange={(e) => setMonthlyPaymentMethod(e.target.value as 'efectivo' | 'tarjeta' | 'transferencia' | 'qr')}
+                      className="w-full bg-[#F0F4F8] border-none rounded-2xl px-4 py-3 focus:ring-2 focus:ring-blue-200 outline-none text-[#243B53]"
+                    >
+                      <option value="efectivo">Efectivo</option>
+                      <option value="tarjeta">Tarjeta</option>
+                      <option value="transferencia">Transferencia</option>
+                      <option value="qr">QR</option>
+                    </select>
+                  </div>
+                  <button type="submit" className="bg-[#486581] text-white py-3 px-6 rounded-2xl font-bold hover:bg-[#334E68] transition-all">
+                    Cobrar y activar plan
+                  </button>
+                </form>
+              </div>
+
+              <div className="bg-white p-8 rounded-[2.5rem] border border-blue-100 shadow-sm space-y-6">
+                <div className="flex flex-wrap gap-4">
+                  <div className="bg-[#F0F4F8] rounded-2xl px-5 py-4 min-w-[180px]">
+                    <p className="text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold">Mensualidades activas</p>
+                    <p className="text-2xl font-black text-[#102A43] mt-1">{activeSubscriptions.length}</p>
+                  </div>
+                  <div className="bg-[#F0F4F8] rounded-2xl px-5 py-4 min-w-[180px]">
+                    <p className="text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold">Vencen en 5 días</p>
+                    <p className="text-2xl font-black text-amber-700 mt-1">{subscriptionsExpiringSoon.length}</p>
+                  </div>
+                  <div className="bg-[#F0F4F8] rounded-2xl px-5 py-4 min-w-[180px]">
+                    <p className="text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold">Celdas ocupadas</p>
+                    <p className="text-2xl font-black text-[#102A43] mt-1">{occupiedCellsCount}</p>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="text-lg font-bold text-[#243B53]">Control de mensualidades</h3>
+                  <p className="text-sm text-[#627D98] mt-1">Visualiza cliente, estado del plan y celda asignada/ocupada.</p>
+                </div>
+
+                <div className="flex flex-wrap gap-3 items-end">
+                  <div className="min-w-[260px]">
+                    <label className="block text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold mb-2">Buscar por placa</label>
+                    <input
+                      type="text"
+                      value={subscriptionSearch}
+                      onChange={(e) => setSubscriptionSearch(e.target.value.toUpperCase())}
+                      placeholder="Ej: ABC123"
+                      className="w-full bg-[#F0F4F8] border-none rounded-2xl px-4 py-3 focus:ring-2 focus:ring-blue-200 outline-none font-mono font-bold text-[#243B53] uppercase"
+                    />
+                  </div>
+                  <label className="inline-flex items-center gap-2 bg-[#F0F4F8] rounded-2xl px-4 py-3 text-sm text-[#243B53] font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={onlyActiveSubscriptions}
+                      onChange={(e) => setOnlyActiveSubscriptions(e.target.checked)}
+                    />
+                    Mostrar solo activas
+                  </label>
+                </div>
+
+                <div className="overflow-x-auto rounded-2xl border border-blue-100">
+                  <table className="w-full text-left min-w-[900px]">
+                    <thead>
+                      <tr className="bg-blue-50/50">
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Cliente</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Placa</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Plan</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Vence</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Celda</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Estado celda</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Ref. pago</th>
+                        <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Estado</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-blue-50">
+                      {filteredSubscriptions.map((s) => (
+                        <tr key={s.id} className="hover:bg-blue-50/30 transition-colors">
+                          <td className="px-6 py-4 font-semibold text-[#243B53]">{s.user_name}</td>
+                          <td className="px-6 py-4 font-mono font-bold text-[#102A43]">{s.plate || '—'}</td>
+                          <td className="px-6 py-4">
+                            <div className="text-sm capitalize font-semibold text-[#243B53]">{s.vehicle_type}</div>
+                            <div className="text-xs text-[#627D98]">{formatCop(s.monthly_fee)}</div>
+                          </td>
+                          <td className="px-6 py-4 text-sm text-[#486581]">
+                            {new Date(s.end_date).toLocaleDateString()} {typeof s.days_remaining === 'number' ? `(${s.days_remaining} días)` : ''}
+                          </td>
+                          <td className="px-6 py-4 font-mono font-bold text-[#243B53]">{s.cell_code || 'Sin asignar'}</td>
+                          <td className="px-6 py-4">
+                            {s.cell_status === 'occupied' && <span className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-bold uppercase">Ocupada</span>}
+                            {s.cell_status === 'available' && <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-bold uppercase">Disponible</span>}
+                            {s.cell_status === 'maintenance' && <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-[10px] font-bold uppercase">Mantenimiento</span>}
+                            {!s.cell_status && <span className="text-[#9FB3C8]">—</span>}
+                          </td>
+                          <td className="px-6 py-4 font-mono text-xs text-[#486581]">{s.payment_reference || '—'}</td>
+                          <td className="px-6 py-4">
+                            {s.status === 'active' ? (
+                              <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-[10px] font-bold uppercase tracking-wider">Activa</span>
+                            ) : (
+                              <span className="px-3 py-1 bg-gray-100 text-gray-500 rounded-full text-[10px] font-bold uppercase tracking-wider">{s.status}</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {filteredSubscriptions.length === 0 && (
+                    <div className="py-10 text-center text-[#9FB3C8]">No hay resultados para los filtros aplicados.</div>
+                  )}
+                </div>
               </div>
 
               <div className="flex items-center gap-4 mb-4">
@@ -757,6 +1160,55 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {receiptModal && (
+          <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+            <div className="w-full max-w-xl bg-white rounded-3xl border border-blue-100 shadow-2xl overflow-hidden">
+              <div className="px-8 py-6 border-b border-blue-100">
+                <h3 className="text-2xl font-black text-[#102A43]">
+                  {typeof receiptModal.parked_minutes === 'number' ? 'Factura de Parqueadero' : 'Factura de Mensualidad'}
+                </h3>
+                <p className="text-sm text-[#627D98] mt-1">
+                  {typeof receiptModal.parked_minutes === 'number'
+                    ? 'Comprobante de pago simulado para entrega al cliente'
+                    : 'Comprobante de pago simulado del plan mensual'}
+                </p>
+              </div>
+
+              <div className="p-8 space-y-4 text-sm text-[#334E68]">
+                <div className="flex justify-between"><span>Referencia</span><span className="font-mono font-bold">{receiptModal.reference}</span></div>
+                <div className="flex justify-between"><span>Fecha</span><span className="font-semibold">{new Date(receiptModal.created_at || receiptModal.paid_at || Date.now()).toLocaleString()}</span></div>
+                <div className="flex justify-between"><span>Placa</span><span className="font-mono font-bold">{receiptModal.plate}</span></div>
+                <div className="flex justify-between"><span>Tipo de vehículo</span><span className="font-semibold capitalize">{receiptModal.vehicle_type}</span></div>
+                {typeof receiptModal.parked_minutes === 'number' && (
+                  <div className="flex justify-between"><span>Tiempo total</span><span className="font-semibold">{receiptModal.parked_minutes} min</span></div>
+                )}
+                <div className="flex justify-between"><span>Método de pago</span><span className="font-semibold capitalize">{receiptModal.payment_method}</span></div>
+                <div className="pt-3 mt-3 border-t border-blue-100 flex justify-between text-base">
+                  <span className="font-bold text-[#102A43]">Total pagado</span>
+                  <span className="font-black text-[#102A43]">{formatCop(receiptModal.amount)}</span>
+                </div>
+              </div>
+
+              <div className="px-8 py-6 border-t border-blue-100 flex flex-wrap gap-3 justify-end">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-5 py-3 rounded-2xl bg-[#486581] text-white font-bold hover:bg-[#334E68] transition-all"
+                >
+                  Imprimir factura
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReceiptModal(null)}
+                  className="px-5 py-3 rounded-2xl bg-[#F0F4F8] text-[#486581] font-bold hover:bg-blue-100 transition-all"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

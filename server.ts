@@ -9,11 +9,118 @@ const __dirname = path.dirname(__filename);
 
 const db = new Database("parking.db");
 
+type VehicleType = "carro" | "moto" | "bicicleta";
+
+const HOURLY_RATES: Record<VehicleType, number> = {
+  carro: 7500,
+  moto: 3500,
+  bicicleta: 2000,
+};
+
+const MONTHLY_RATES: Record<VehicleType, number> = {
+  carro: 240000,
+  moto: 132000,
+  bicicleta: 60000,
+};
+
+const FRACTION_MINUTES = 15;
+const ALLOWED_PAYMENT_METHODS = ["efectivo", "tarjeta", "transferencia", "qr", "mensualidad"];
+const ALLOWED_SIMULATED_METHODS = ["efectivo", "tarjeta", "transferencia", "qr"];
+
+function normalizePlate(input: unknown): string {
+  return String(input || "").trim().toUpperCase();
+}
+
+function normalizeVehicleType(input: unknown): VehicleType {
+  const value = String(input || "").toLowerCase();
+  if (value === "moto") return "moto";
+  if (value === "bicicleta") return "bicicleta";
+  return "carro";
+}
+
+function normalizeSqlDate(input: string): string {
+  return input.includes("T") ? input : `${input.replace(" ", "T")}Z`;
+}
+
+function getParkedMinutes(entryTime: string, exitTimeIso: string): number {
+  const entryMs = new Date(normalizeSqlDate(entryTime)).getTime();
+  const exitMs = new Date(exitTimeIso).getTime();
+  const diffMinutes = Math.ceil((exitMs - entryMs) / 60000);
+  return Math.max(1, diffMinutes);
+}
+
+function calculateParkingCharge(parkedMinutes: number, vehicleType: VehicleType): { amount: number; hourlyRate: number } {
+  const hourlyRate = HOURLY_RATES[vehicleType];
+  if (parkedMinutes <= 60) {
+    return { amount: hourlyRate, hourlyRate };
+  }
+  const remainingMinutes = parkedMinutes - 60;
+  const fractionCount = Math.ceil(remainingMinutes / FRACTION_MINUTES);
+  const fractionValue = hourlyRate / (60 / FRACTION_MINUTES);
+  return {
+    amount: Math.round(hourlyRate + fractionCount * fractionValue),
+    hourlyRate,
+  };
+}
+
+function getActiveMonthlySubscriptionByPlate(plate: string):
+  | { id: number; monthly_fee: number; vehicle_type: VehicleType; end_date: string }
+  | undefined {
+  return db
+    .prepare(
+      `
+      SELECT s.id, s.monthly_fee, s.vehicle_type, s.end_date
+      FROM subscriptions s
+      JOIN users u ON u.id = s.user_id
+      WHERE u.plate = ?
+        AND s.status = 'active'
+        AND datetime('now') BETWEEN datetime(s.start_date) AND datetime(s.end_date)
+      ORDER BY s.end_date DESC
+      LIMIT 1
+    `
+    )
+    .get(plate) as { id: number; monthly_fee: number; vehicle_type: VehicleType; end_date: string } | undefined;
+}
+
+function buildQuoteForPlate(plate: string) {
+  const parked = db
+    .prepare("SELECT id, plate, entry_time, vehicle_type FROM logs WHERE plate = ? AND status = 'parked'")
+    .get(plate) as { id: number; plate: string; entry_time: string; vehicle_type?: string } | undefined;
+
+  if (!parked) {
+    return { error: "Vehículo no encontrado o ya ha salido" };
+  }
+
+  const exitAttemptIso = new Date().toISOString();
+  const vehicleType = normalizeVehicleType(parked.vehicle_type);
+  const parkedMinutes = getParkedMinutes(parked.entry_time, exitAttemptIso);
+  const monthly = getActiveMonthlySubscriptionByPlate(plate);
+  const charge = calculateParkingCharge(parkedMinutes, vehicleType);
+
+  return {
+    quote: {
+      log_id: parked.id,
+      plate,
+      vehicle_type: vehicleType,
+      entry_time: parked.entry_time,
+      exit_attempt_time: exitAttemptIso,
+      parked_minutes: parkedMinutes,
+      hourly_rate: charge.hourlyRate,
+      fraction_minutes: FRACTION_MINUTES,
+      amount: monthly ? 0 : charge.amount,
+      has_monthly: Boolean(monthly),
+      monthly_fee: monthly ? monthly.monthly_fee : null,
+      monthly_end_date: monthly ? monthly.end_date : null,
+    },
+  };
+}
+
 // Initialize Database
 db.exec(`
   CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plate TEXT NOT NULL,
+    vehicle_type TEXT NOT NULL DEFAULT 'carro',
     entry_time DATETIME DEFAULT CURRENT_TIMESTAMP,
     exit_time DATETIME,
     status TEXT DEFAULT 'parked'
@@ -36,6 +143,51 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'available',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    vehicle_type TEXT NOT NULL,
+    monthly_fee INTEGER NOT NULL,
+    start_date DATETIME NOT NULL,
+    end_date DATETIME NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS subscription_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    plate TEXT NOT NULL,
+    vehicle_type TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    payment_method TEXT NOT NULL DEFAULT 'mensualidad',
+    status TEXT NOT NULL DEFAULT 'approved',
+    reference TEXT NOT NULL,
+    paid_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(subscription_id) REFERENCES subscriptions(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    log_id INTEGER NOT NULL,
+    plate TEXT NOT NULL,
+    vehicle_type TEXT NOT NULL,
+    entry_time DATETIME NOT NULL,
+    exit_attempt_time DATETIME NOT NULL,
+    parked_minutes INTEGER NOT NULL,
+    hourly_rate INTEGER NOT NULL,
+    fraction_minutes INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    payment_method TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'approved',
+    reference TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(log_id) REFERENCES logs(id)
+  );
 `);
 
 // Migrar tablas existentes: añadir columnas si no existen (SQLite no tiene IF NOT EXISTS para columnas)
@@ -47,6 +199,7 @@ function addColumnIfMissing(table: string, column: string, def: string) {
 addColumnIfMissing("users", "plate", "TEXT");
 addColumnIfMissing("users", "cell_id", "INTEGER");
 addColumnIfMissing("cells", "vehicle_type", "TEXT NOT NULL DEFAULT 'todos'");
+addColumnIfMissing("logs", "vehicle_type", "TEXT NOT NULL DEFAULT 'carro'");
 
 async function startServer() {
   const app = express();
@@ -57,30 +210,141 @@ async function startServer() {
   
   // Register Entry
   app.post("/api/entry", (req, res) => {
-    const { plate } = req.body;
-    if (!plate) {
+    const { plate, vehicle_type } = req.body;
+    const normalizedPlate = normalizePlate(plate);
+    const normalizedVehicleType = normalizeVehicleType(vehicle_type);
+    if (!normalizedPlate) {
       return res.status(400).json({ error: "La placa es requerida" });
     }
     
-    const existing = db.prepare("SELECT * FROM logs WHERE plate = ? AND status = 'parked'").get(plate);
+    const existing = db.prepare("SELECT * FROM logs WHERE plate = ? AND status = 'parked'").get(normalizedPlate);
     if (existing) {
       return res.status(400).json({ error: "Vehículo ya se encuentra en el parqueadero" });
     }
 
-    const info = db.prepare("INSERT INTO logs (plate) VALUES (?)").run(plate);
+    const info = db
+      .prepare("INSERT INTO logs (plate, vehicle_type) VALUES (?, ?)")
+      .run(normalizedPlate, normalizedVehicleType);
     res.json({ id: info.lastInsertRowid, success: true });
+  });
+
+  app.get("/api/payment-config", (_req, res) => {
+    res.json({
+      hourly_rates: HOURLY_RATES,
+      monthly_rates: MONTHLY_RATES,
+      fraction_minutes: FRACTION_MINUTES,
+      rule: "Primera hora completa y luego cobro por fracciones",
+      payment_methods: ALLOWED_SIMULATED_METHODS,
+    });
+  });
+
+  app.post("/api/payments/quote", (req, res) => {
+    const normalizedPlate = normalizePlate(req.body?.plate);
+    if (!normalizedPlate) {
+      return res.status(400).json({ error: "La placa es requerida" });
+    }
+    const result = buildQuoteForPlate(normalizedPlate);
+    if ("error" in result) {
+      return res.status(404).json({ error: result.error });
+    }
+    res.json(result.quote);
+  });
+
+  app.post("/api/payments/process", (req, res) => {
+    const normalizedPlate = normalizePlate(req.body?.plate);
+    const paymentMethod = String(req.body?.payment_method || "efectivo").toLowerCase();
+
+    if (!normalizedPlate) {
+      return res.status(400).json({ error: "La placa es requerida" });
+    }
+    if (!ALLOWED_PAYMENT_METHODS.includes(paymentMethod)) {
+      return res.status(400).json({ error: "Método de pago no válido" });
+    }
+
+    const result = buildQuoteForPlate(normalizedPlate);
+    if ("error" in result) {
+      return res.status(404).json({ error: result.error });
+    }
+
+    const quote = result.quote;
+    const existingApproved = db
+      .prepare("SELECT * FROM payments WHERE log_id = ? AND status = 'approved' ORDER BY created_at DESC LIMIT 1")
+      .get(quote.log_id);
+
+    if (existingApproved) {
+      return res.json({ success: true, payment: existingApproved, reused: true });
+    }
+
+    const methodToSave = quote.has_monthly ? "mensualidad" : paymentMethod;
+    const reference = `SIM-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    const info = db
+      .prepare(
+        `
+        INSERT INTO payments (
+          log_id, plate, vehicle_type, entry_time, exit_attempt_time,
+          parked_minutes, hourly_rate, fraction_minutes, amount,
+          payment_method, status, reference
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?)
+      `
+      )
+      .run(
+        quote.log_id,
+        quote.plate,
+        quote.vehicle_type,
+        quote.entry_time,
+        quote.exit_attempt_time,
+        quote.parked_minutes,
+        quote.hourly_rate,
+        quote.fraction_minutes,
+        quote.amount,
+        methodToSave,
+        reference
+      );
+
+    const payment = db.prepare("SELECT * FROM payments WHERE id = ?").get(info.lastInsertRowid);
+    res.json({ success: true, payment, reused: false });
+  });
+
+  app.get("/api/payments", (_req, res) => {
+    const payments = db
+      .prepare("SELECT * FROM payments ORDER BY created_at DESC LIMIT 100")
+      .all();
+    res.json(payments);
   });
 
   // Register Exit
   app.post("/api/exit", (req, res) => {
     const { plate } = req.body;
-    if (!plate) {
+    const normalizedPlate = normalizePlate(plate);
+    if (!normalizedPlate) {
       return res.status(400).json({ error: "La placa es requerida" });
+    }
+
+    const parked = db
+      .prepare("SELECT id FROM logs WHERE plate = ? AND status = 'parked' ORDER BY entry_time DESC LIMIT 1")
+      .get(normalizedPlate) as { id: number } | undefined;
+
+    if (!parked) {
+      return res.status(404).json({ error: "Vehículo no encontrado o ya ha salido" });
+    }
+
+    const hasApprovedPayment = db
+      .prepare("SELECT id FROM payments WHERE log_id = ? AND status = 'approved' ORDER BY created_at DESC LIMIT 1")
+      .get(parked.id);
+
+    const hasActiveMonthly = getActiveMonthlySubscriptionByPlate(normalizedPlate);
+
+    if (!hasApprovedPayment && !hasActiveMonthly) {
+      return res.status(402).json({
+        error: "Debe registrar el pago antes de la salida",
+        code: "PAYMENT_REQUIRED",
+      });
     }
     
     const info = db.prepare(
       "UPDATE logs SET exit_time = CURRENT_TIMESTAMP, status = 'exited' WHERE plate = ? AND status = 'parked'"
-    ).run(plate);
+    ).run(normalizedPlate);
     
     if (info.changes === 0) {
       return res.status(404).json({ error: "Vehículo no encontrado o ya ha salido" });
@@ -100,8 +364,106 @@ async function startServer() {
 
   // Get history
   app.get("/api/history", (req, res) => {
-    const history = db.prepare("SELECT * FROM logs ORDER BY entry_time DESC LIMIT 50").all();
+    const history = db
+      .prepare(
+        `
+        SELECT l.*, p.amount AS paid_amount, p.payment_method
+        FROM logs l
+        LEFT JOIN payments p ON p.log_id = l.id AND p.status = 'approved'
+        ORDER BY l.entry_time DESC
+        LIMIT 50
+      `
+      )
+      .all();
     res.json(history);
+  });
+
+  // --- Subscriptions API (mensualidades) ---
+  app.get("/api/subscriptions", (_req, res) => {
+    const rows = db
+      .prepare(
+        `
+        SELECT s.id, s.user_id, u.name AS user_name, u.plate, s.vehicle_type, s.monthly_fee,
+               s.start_date, s.end_date, s.status, s.created_at,
+               c.code AS cell_code, c.status AS cell_status,
+               CAST(julianday(s.end_date) - julianday('now') AS INTEGER) AS days_remaining,
+               sp.reference AS payment_reference,
+               sp.paid_at AS payment_date
+        FROM subscriptions s
+        JOIN users u ON u.id = s.user_id
+        LEFT JOIN cells c ON c.id = u.cell_id
+        LEFT JOIN subscription_payments sp ON sp.subscription_id = s.id
+        ORDER BY s.created_at DESC
+      `
+      )
+      .all();
+    res.json(rows);
+  });
+
+  app.get("/api/subscription-payments", (_req, res) => {
+    const rows = db
+      .prepare(
+        `
+        SELECT sp.*, u.name AS user_name
+        FROM subscription_payments sp
+        JOIN users u ON u.id = sp.user_id
+        ORDER BY sp.paid_at DESC
+        LIMIT 100
+      `
+      )
+      .all();
+    res.json(rows);
+  });
+
+  app.post("/api/subscriptions/activate", (req, res) => {
+    const normalizedPlate = normalizePlate(req.body?.plate);
+    const vehicleType = normalizeVehicleType(req.body?.vehicle_type);
+    const paymentMethod = String(req.body?.payment_method || "efectivo").toLowerCase();
+    if (!normalizedPlate) {
+      return res.status(400).json({ error: "La placa es requerida" });
+    }
+    if (!ALLOWED_SIMULATED_METHODS.includes(paymentMethod)) {
+      return res.status(400).json({ error: "Método de pago no válido" });
+    }
+
+    const user = db
+      .prepare("SELECT id, plate FROM users WHERE plate = ? LIMIT 1")
+      .get(normalizedPlate) as { id: number; plate: string } | undefined;
+
+    if (!user) {
+      return res.status(404).json({ error: "No existe un usuario registrado con esa placa" });
+    }
+
+    db.prepare("UPDATE subscriptions SET status = 'expired' WHERE user_id = ? AND status = 'active'").run(user.id);
+
+    const monthlyFee = MONTHLY_RATES[vehicleType];
+    const info = db
+      .prepare(
+        `
+        INSERT INTO subscriptions (user_id, vehicle_type, monthly_fee, start_date, end_date, status)
+        VALUES (?, ?, ?, datetime('now'), datetime('now', '+30 days'), 'active')
+      `
+      )
+      .run(user.id, vehicleType, monthlyFee);
+
+    const subscription = db
+      .prepare("SELECT * FROM subscriptions WHERE id = ?")
+      .get(info.lastInsertRowid);
+
+    const reference = `SUB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const paymentInfo = db.prepare(
+      `
+      INSERT INTO subscription_payments (
+        subscription_id, user_id, plate, vehicle_type, amount, payment_method, status, reference
+      ) VALUES (?, ?, ?, ?, ?, ?, 'approved', ?)
+    `
+    ).run(Number(info.lastInsertRowid), user.id, normalizedPlate, vehicleType, monthlyFee, paymentMethod, reference);
+
+    const payment = db
+      .prepare("SELECT * FROM subscription_payments WHERE id = ?")
+      .get(paymentInfo.lastInsertRowid);
+
+    res.status(201).json({ success: true, subscription, payment });
   });
 
   // --- Users API (CRUD) ---
