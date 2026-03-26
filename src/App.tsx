@@ -356,6 +356,7 @@ export default function App() {
         }
         fetchSubscriptions();
         fetchUsers();
+        fetchCells();
       } else {
         alert(data.error || 'No fue posible activar la mensualidad');
       }

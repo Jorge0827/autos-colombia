@@ -201,6 +201,42 @@ addColumnIfMissing("users", "cell_id", "INTEGER");
 addColumnIfMissing("cells", "vehicle_type", "TEXT NOT NULL DEFAULT 'todos'");
 addColumnIfMissing("logs", "vehicle_type", "TEXT NOT NULL DEFAULT 'carro'");
 
+function backfillCellsForActiveSubscriptions() {
+  const subscriptionsWithoutCell = db
+    .prepare(
+      `
+      SELECT s.id AS subscription_id, u.id AS user_id, s.vehicle_type
+      FROM subscriptions s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.status = 'active' AND u.cell_id IS NULL
+      ORDER BY s.created_at ASC
+    `
+    )
+    .all() as Array<{ subscription_id: number; user_id: number; vehicle_type: VehicleType }>;
+
+  for (const item of subscriptionsWithoutCell) {
+    const availableCell = db
+      .prepare(
+        `
+        SELECT id
+        FROM cells
+        WHERE status = 'available'
+          AND (vehicle_type = ? OR vehicle_type = 'todos')
+        ORDER BY code ASC
+        LIMIT 1
+      `
+      )
+      .get(item.vehicle_type) as { id: number } | undefined;
+
+    if (availableCell) {
+      db.prepare("UPDATE users SET cell_id = ? WHERE id = ?").run(availableCell.id, item.user_id);
+      db.prepare("UPDATE cells SET status = 'occupied' WHERE id = ?").run(availableCell.id);
+    }
+  }
+}
+
+backfillCellsForActiveSubscriptions();
+
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -427,11 +463,32 @@ async function startServer() {
     }
 
     const user = db
-      .prepare("SELECT id, plate FROM users WHERE plate = ? LIMIT 1")
-      .get(normalizedPlate) as { id: number; plate: string } | undefined;
+      .prepare("SELECT id, plate, cell_id FROM users WHERE plate = ? LIMIT 1")
+      .get(normalizedPlate) as { id: number; plate: string; cell_id: number | null } | undefined;
 
     if (!user) {
       return res.status(404).json({ error: "No existe un usuario registrado con esa placa" });
+    }
+
+    // Si el usuario no tiene celda, se asigna automáticamente una compatible.
+    if (!user.cell_id) {
+      const availableCell = db
+        .prepare(
+          `
+          SELECT id
+          FROM cells
+          WHERE status = 'available'
+            AND (vehicle_type = ? OR vehicle_type = 'todos')
+          ORDER BY code ASC
+          LIMIT 1
+        `
+        )
+        .get(vehicleType) as { id: number } | undefined;
+
+      if (availableCell) {
+        db.prepare("UPDATE users SET cell_id = ? WHERE id = ?").run(availableCell.id, user.id);
+        db.prepare("UPDATE cells SET status = 'occupied' WHERE id = ?").run(availableCell.id);
+      }
     }
 
     db.prepare("UPDATE subscriptions SET status = 'expired' WHERE user_id = ? AND status = 'active'").run(user.id);
