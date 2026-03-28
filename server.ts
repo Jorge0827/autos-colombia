@@ -10,22 +10,56 @@ const __dirname = path.dirname(__filename);
 const db = new Database("parking.db");
 
 type VehicleType = "carro" | "moto" | "bicicleta";
+type RateType = "hourly" | "monthly";
 
-const HOURLY_RATES: Record<VehicleType, number> = {
+interface Rate {
+  id: number;
+  vehicle_type: VehicleType;
+  rate_type: RateType;
+  amount: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// En memoria para cache (se cargan de BD)
+let HOURLY_RATES: Record<VehicleType, number> = {
   carro: 7500,
   moto: 3500,
   bicicleta: 2000,
 };
 
-const MONTHLY_RATES: Record<VehicleType, number> = {
+let MONTHLY_RATES: Record<VehicleType, number> = {
   carro: 240000,
   moto: 132000,
   bicicleta: 60000,
 };
 
-const FRACTION_MINUTES = 15;
+let FRACTION_MINUTES = 15;
 const ALLOWED_PAYMENT_METHODS = ["efectivo", "tarjeta", "transferencia", "qr", "mensualidad"];
 const ALLOWED_SIMULATED_METHODS = ["efectivo", "tarjeta", "transferencia", "qr"];
+
+// Función para recargar tarifas desde BD
+function loadRatesFromDatabase() {
+  try {
+    const rates = db.prepare("SELECT * FROM rates WHERE is_active = 1").all() as Rate[];
+    
+    // Resetear valores por defecto
+    HOURLY_RATES = { carro: 7500, moto: 3500, bicicleta: 2000 };
+    MONTHLY_RATES = { carro: 240000, moto: 132000, bicicleta: 60000 };
+    
+    // Aplicar tarifas de BD
+    for (const rate of rates) {
+      if (rate.rate_type === "hourly") {
+        HOURLY_RATES[rate.vehicle_type] = rate.amount;
+      } else if (rate.rate_type === "monthly") {
+        MONTHLY_RATES[rate.vehicle_type] = rate.amount;
+      }
+    }
+  } catch (_) {
+    // Si la tabla no existe, se mantienen los valores por defecto
+  }
+}
 
 function normalizePlate(input: unknown): string {
   return String(input || "").trim().toUpperCase();
@@ -80,6 +114,59 @@ function getActiveMonthlySubscriptionByPlate(plate: string):
     `
     )
     .get(plate) as { id: number; monthly_fee: number; vehicle_type: VehicleType; end_date: string } | undefined;
+}
+
+function getRegisteredUserByPlate(plate: string): { id: number; cell_id: number | null } | undefined {
+  return db
+    .prepare("SELECT id, cell_id FROM users WHERE plate = ? LIMIT 1")
+    .get(plate) as { id: number; cell_id: number | null } | undefined;
+}
+
+// Función para asignar una celda disponible a un vehículo
+function assignAvailableCell(vehicleType: VehicleType): { id: number; code: string } | null {
+  const availableCell = db
+    .prepare(
+      `
+      SELECT id, code
+      FROM cells
+      WHERE status = 'available'
+        AND (vehicle_type = ? OR vehicle_type = 'todos')
+      ORDER BY code ASC
+      LIMIT 1
+    `
+    )
+    .get(vehicleType) as { id: number; code: string } | null;
+
+  if (!availableCell) {
+    return null;
+  }
+
+  db.prepare("UPDATE cells SET status = 'occupied', visitor_name = 'visitante' WHERE id = ?").run(availableCell.id);
+
+  return availableCell;
+}
+
+// Función para obtener la celda asignada de un usuario con mensualidad activa
+function getAssignedCellForSubscriber(plate: string): { id: number; code: string; cell_id: number } | null {
+  const result = db
+    .prepare(
+      `
+      SELECT u.cell_id, c.id, c.code
+      FROM users u
+      LEFT JOIN cells c ON u.cell_id = c.id
+      LEFT JOIN subscriptions s ON u.id = s.user_id AND s.status = 'active'
+      WHERE u.plate = ?
+        AND u.cell_id IS NOT NULL
+        AND c.id IS NOT NULL
+        AND c.status IN ('reserved', 'occupied')
+        AND s.id IS NOT NULL
+        AND datetime('now') BETWEEN datetime(s.start_date) AND datetime(s.end_date)
+      LIMIT 1
+    `
+    )
+    .get(plate) as { id: number; code: string; cell_id: number } | null;
+
+  return result;
 }
 
 function buildQuoteForPlate(plate: string) {
@@ -144,6 +231,17 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vehicle_type TEXT NOT NULL DEFAULT 'carro',
+    rate_type TEXT NOT NULL DEFAULT 'hourly',
+    amount INTEGER NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(vehicle_type, rate_type)
+  );
+
   CREATE TABLE IF NOT EXISTS subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -199,7 +297,36 @@ function addColumnIfMissing(table: string, column: string, def: string) {
 addColumnIfMissing("users", "plate", "TEXT");
 addColumnIfMissing("users", "cell_id", "INTEGER");
 addColumnIfMissing("cells", "vehicle_type", "TEXT NOT NULL DEFAULT 'todos'");
+addColumnIfMissing("cells", "visitor_name", "TEXT");
 addColumnIfMissing("logs", "vehicle_type", "TEXT NOT NULL DEFAULT 'carro'");
+addColumnIfMissing("logs", "cell_id", "INTEGER");
+
+// Inicializar tarifas por defecto si la tabla está vacía
+function initializeDefaultRates() {
+  const existingRates = db.prepare("SELECT COUNT(*) as count FROM rates").get() as { count: number };
+  
+  if (existingRates.count === 0) {
+    const defaultRates = [
+      { vehicle_type: "carro", rate_type: "hourly", amount: 7500 },
+      { vehicle_type: "moto", rate_type: "hourly", amount: 3500 },
+      { vehicle_type: "bicicleta", rate_type: "hourly", amount: 2000 },
+      { vehicle_type: "carro", rate_type: "monthly", amount: 240000 },
+      { vehicle_type: "moto", rate_type: "monthly", amount: 132000 },
+      { vehicle_type: "bicicleta", rate_type: "monthly", amount: 60000 },
+    ];
+    
+    const insertStmt = db.prepare(
+      "INSERT INTO rates (vehicle_type, rate_type, amount, is_active) VALUES (?, ?, ?, 1)"
+    );
+    
+    for (const rate of defaultRates) {
+      insertStmt.run(rate.vehicle_type, rate.rate_type, rate.amount);
+    }
+  }
+  
+  // Cargar tarifas en memoria
+  loadRatesFromDatabase();
+}
 
 function backfillCellsForActiveSubscriptions() {
   const subscriptionsWithoutCell = db
@@ -230,12 +357,48 @@ function backfillCellsForActiveSubscriptions() {
 
     if (availableCell) {
       db.prepare("UPDATE users SET cell_id = ? WHERE id = ?").run(availableCell.id, item.user_id);
-      db.prepare("UPDATE cells SET status = 'occupied' WHERE id = ?").run(availableCell.id);
+      db.prepare("UPDATE cells SET status = 'reserved', visitor_name = NULL WHERE id = ?").run(availableCell.id);
     }
   }
 }
 
+function syncReservedAndOccupiedCellsForActiveSubscribers() {
+  db.prepare(
+    `
+    UPDATE cells
+    SET status = 'reserved', visitor_name = NULL
+    WHERE id IN (
+      SELECT DISTINCT u.cell_id
+      FROM users u
+      JOIN subscriptions s ON s.user_id = u.id
+      WHERE u.cell_id IS NOT NULL
+        AND s.status = 'active'
+        AND datetime('now') BETWEEN datetime(s.start_date) AND datetime(s.end_date)
+    )
+  `
+  ).run();
+
+  db.prepare(
+    `
+    UPDATE cells
+    SET status = 'occupied'
+    WHERE id IN (
+      SELECT DISTINCT l.cell_id
+      FROM logs l
+      JOIN users u ON u.plate = l.plate
+      JOIN subscriptions s ON s.user_id = u.id
+      WHERE l.status = 'parked'
+        AND l.cell_id IS NOT NULL
+        AND s.status = 'active'
+        AND datetime('now') BETWEEN datetime(s.start_date) AND datetime(s.end_date)
+    )
+  `
+  ).run();
+}
+
 backfillCellsForActiveSubscriptions();
+syncReservedAndOccupiedCellsForActiveSubscribers();
+initializeDefaultRates();
 
 async function startServer() {
   const app = express();
@@ -258,10 +421,49 @@ async function startServer() {
       return res.status(400).json({ error: "Vehículo ya se encuentra en el parqueadero" });
     }
 
+    const registeredUser = getRegisteredUserByPlate(normalizedPlate);
+
+    // Verificar si el usuario tiene mensualidad activa y celda asignada reservada.
+    const subscriberCell = getAssignedCellForSubscriber(normalizedPlate);
+    let assignedCell: { id: number; code: string } | null = null;
+
+    if (subscriberCell) {
+      // Usuario con mensualidad activa: usa su celda reservada y pasa a ocupada durante la estancia.
+      db.prepare("UPDATE cells SET status = 'occupied' WHERE id = ?").run(subscriberCell.id);
+      assignedCell = { id: subscriberCell.id, code: subscriberCell.code };
+    } else if (registeredUser) {
+      if (!registeredUser.cell_id) {
+        return res.status(409).json({
+          error: "La placa está registrada pero no tiene celda reservada. Asigne una celda antes del ingreso.",
+          code: "REGISTERED_WITHOUT_CELL",
+        });
+      }
+      return res.status(403).json({
+        error: "La placa está registrada. Solo puede ingresar con mensualidad activa usando su celda reservada.",
+        code: "REGISTERED_REQUIRES_ACTIVE_SUBSCRIPTION",
+      });
+    } else {
+      // Visitante: solo puede usar celdas disponibles.
+      assignedCell = assignAvailableCell(normalizedVehicleType);
+    }
+    
+    if (!assignedCell) {
+      return res.status(507).json({ 
+        error: "El parqueadero está lleno. No hay celdas disponibles para este tipo de vehículo",
+        code: "PARKING_FULL"
+      });
+    }
+
     const info = db
-      .prepare("INSERT INTO logs (plate, vehicle_type) VALUES (?, ?)")
-      .run(normalizedPlate, normalizedVehicleType);
-    res.json({ id: info.lastInsertRowid, success: true });
+      .prepare("INSERT INTO logs (plate, vehicle_type, cell_id) VALUES (?, ?, ?)")
+      .run(normalizedPlate, normalizedVehicleType, assignedCell.id);
+    
+    res.json({ 
+      id: info.lastInsertRowid, 
+      success: true,
+      cell_code: assignedCell.code,
+      cell_id: assignedCell.id
+    });
   });
 
   app.get("/api/payment-config", (_req, res) => {
@@ -272,6 +474,111 @@ async function startServer() {
       rule: "Primera hora completa y luego cobro por fracciones",
       payment_methods: ALLOWED_SIMULATED_METHODS,
     });
+  });
+
+  // --- Rates API (Gestión de tarifas) ---
+  app.get("/api/rates", (_req, res) => {
+    const rates = db.prepare("SELECT * FROM rates ORDER BY vehicle_type, rate_type").all();
+    res.json(rates);
+  });
+
+  app.post("/api/rates", (req, res) => {
+    const { vehicle_type, rate_type, amount } = req.body;
+    
+    if (!vehicle_type || !rate_type || amount === undefined) {
+      return res.status(400).json({ error: "vehicle_type, rate_type y amount son requeridos" });
+    }
+    
+    if (!["carro", "moto", "bicicleta"].includes(vehicle_type)) {
+      return res.status(400).json({ error: "vehicle_type inválido" });
+    }
+    
+    if (!["hourly", "monthly"].includes(rate_type)) {
+      return res.status(400).json({ error: "rate_type debe ser 'hourly' o 'monthly'" });
+    }
+    
+    if (typeof amount !== "number" || amount <= 0) {
+      return res.status(400).json({ error: "amount debe ser un número positivo" });
+    }
+    
+    try {
+      const info = db.prepare(
+        "INSERT INTO rates (vehicle_type, rate_type, amount, is_active) VALUES (?, ?, ?, 1)"
+      ).run(vehicle_type, rate_type, Math.round(amount));
+      
+      loadRatesFromDatabase();
+      
+      const rate = db.prepare("SELECT * FROM rates WHERE id = ?").get(info.lastInsertRowid);
+      res.status(201).json(rate);
+    } catch (e: unknown) {
+      if (e && typeof e === "object" && "code" in e && (e as { code: string }).code === "SQLITE_CONSTRAINT") {
+        return res.status(400).json({ error: "Ya existe una tarifa para este tipo de vehículo y tipo de tarifa" });
+      }
+      throw e;
+    }
+  });
+
+  app.put("/api/rates/:id", (req, res) => {
+    const id = Number(req.params.id);
+    const { amount, is_active } = req.body;
+    
+    if (amount !== undefined && (typeof amount !== "number" || amount <= 0)) {
+      return res.status(400).json({ error: "amount debe ser un número positivo" });
+    }
+    
+    const rate = db.prepare("SELECT * FROM rates WHERE id = ?").get(id);
+    if (!rate) {
+      return res.status(404).json({ error: "Tarifa no encontrada" });
+    }
+    
+    const finalAmount = amount !== undefined ? Math.round(amount) : rate.amount;
+    const finalIsActive = is_active !== undefined ? (is_active ? 1 : 0) : rate.is_active;
+    
+    const info = db.prepare(
+      "UPDATE rates SET amount = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    ).run(finalAmount, finalIsActive, id);
+    
+    if (info.changes === 0) {
+      return res.status(404).json({ error: "Tarifa no encontrada" });
+    }
+    
+    loadRatesFromDatabase();
+    
+    const updated = db.prepare("SELECT * FROM rates WHERE id = ?").get(id);
+    res.json(updated);
+  });
+
+  app.delete("/api/rates/:id", (req, res) => {
+    const id = Number(req.params.id);
+    
+    const rate = db.prepare("SELECT * FROM rates WHERE id = ?").get(id);
+    if (!rate) {
+      return res.status(404).json({ error: "Tarifa no encontrada" });
+    }
+    
+    // Marcar como inactiva en lugar de eliminar
+    db.prepare("UPDATE rates SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+    
+    loadRatesFromDatabase();
+    
+    res.json({ success: true, message: "Tarifa desactivada" });
+  });
+
+  // Reactivar tarifa
+  app.post("/api/rates/:id/reactivate", (req, res) => {
+    const id = Number(req.params.id);
+    
+    const rate = db.prepare("SELECT * FROM rates WHERE id = ?").get(id);
+    if (!rate) {
+      return res.status(404).json({ error: "Tarifa no encontrada" });
+    }
+    
+    db.prepare("UPDATE rates SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(id);
+    
+    loadRatesFromDatabase();
+    
+    const updated = db.prepare("SELECT * FROM rates WHERE id = ?").get(id);
+    res.json(updated);
   });
 
   app.post("/api/payments/quote", (req, res) => {
@@ -358,8 +665,8 @@ async function startServer() {
     }
 
     const parked = db
-      .prepare("SELECT id FROM logs WHERE plate = ? AND status = 'parked' ORDER BY entry_time DESC LIMIT 1")
-      .get(normalizedPlate) as { id: number } | undefined;
+      .prepare("SELECT id, cell_id FROM logs WHERE plate = ? AND status = 'parked' ORDER BY entry_time DESC LIMIT 1")
+      .get(normalizedPlate) as { id: number; cell_id: number | null } | undefined;
 
     if (!parked) {
       return res.status(404).json({ error: "Vehículo no encontrado o ya ha salido" });
@@ -385,15 +692,27 @@ async function startServer() {
     if (info.changes === 0) {
       return res.status(404).json({ error: "Vehículo no encontrado o ya ha salido" });
     }
+
+    // Ciclo de celdas:
+    // - Mensualidad activa: occupied -> reserved
+    // - Visitante: occupied -> available
+    if (parked.cell_id && hasActiveMonthly) {
+      db.prepare("UPDATE cells SET status = 'reserved', visitor_name = NULL WHERE id = ?").run(parked.cell_id);
+    } else if (parked.cell_id) {
+      db.prepare("UPDATE cells SET status = 'available', visitor_name = NULL WHERE id = ?").run(parked.cell_id);
+    }
+
     res.json({ success: true });
   });
 
   // Get current parked vehicles
   app.get("/api/parked", (req, res) => {
     const parked = db.prepare(`
-      SELECT * FROM logs 
-      WHERE status = 'parked'
-      ORDER BY entry_time DESC
+      SELECT l.*, c.code AS cell_code, c.status AS cell_status
+      FROM logs l
+      LEFT JOIN cells c ON l.cell_id = c.id
+      WHERE l.status = 'parked'
+      ORDER BY l.entry_time DESC
     `).all();
     res.json(parked);
   });
@@ -403,9 +722,10 @@ async function startServer() {
     const history = db
       .prepare(
         `
-        SELECT l.*, p.amount AS paid_amount, p.payment_method
+        SELECT l.*, p.amount AS paid_amount, p.payment_method, c.code AS cell_code, c.status AS cell_status
         FROM logs l
         LEFT JOIN payments p ON p.log_id = l.id AND p.status = 'approved'
+        LEFT JOIN cells c ON l.cell_id = c.id
         ORDER BY l.entry_time DESC
         LIMIT 50
       `
@@ -487,8 +807,10 @@ async function startServer() {
 
       if (availableCell) {
         db.prepare("UPDATE users SET cell_id = ? WHERE id = ?").run(availableCell.id, user.id);
-        db.prepare("UPDATE cells SET status = 'occupied' WHERE id = ?").run(availableCell.id);
+        db.prepare("UPDATE cells SET status = 'reserved', visitor_name = NULL WHERE id = ?").run(availableCell.id);
       }
+    } else {
+      db.prepare("UPDATE cells SET status = 'reserved', visitor_name = NULL WHERE id = ?").run(user.cell_id);
     }
 
     db.prepare("UPDATE subscriptions SET status = 'expired' WHERE user_id = ? AND status = 'active'").run(user.id);
@@ -626,9 +948,12 @@ async function startServer() {
     const vtype = ["carro", "moto", "bicicleta", "todos"].includes(String(vehicle_type || "").toLowerCase())
       ? String(vehicle_type).toLowerCase()
       : "todos";
+    const normalizedStatus = ["available", "occupied", "reserved", "maintenance"].includes(String(status || "").toLowerCase())
+      ? String(status).toLowerCase()
+      : "available";
     const info = db.prepare(
       "UPDATE cells SET code = ?, status = ?, vehicle_type = ? WHERE id = ?"
-    ).run(String(code).trim().toUpperCase(), status || "available", vtype, id);
+    ).run(String(code).trim().toUpperCase(), normalizedStatus, vtype, id);
     if (info.changes === 0) {
       return res.status(404).json({ error: "Celda no encontrada" });
     }
@@ -658,7 +983,7 @@ async function startServer() {
       db.prepare("UPDATE cells SET status = 'available' WHERE id = ?").run(user.cell_id);
     }
     db.prepare("UPDATE users SET cell_id = ? WHERE id = ?").run(cellId, userId);
-    db.prepare("UPDATE cells SET status = 'occupied' WHERE id = ?").run(cellId);
+    db.prepare("UPDATE cells SET status = 'reserved', visitor_name = NULL WHERE id = ?").run(cellId);
     res.json({ success: true });
   });
 

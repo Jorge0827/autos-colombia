@@ -13,9 +13,11 @@ import {
   LayoutGrid,
   Pencil,
   Trash2,
-  X
+  X,
+  DollarSign
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import RatesManager from './RatesManager';
 
 interface Log {
   id: number;
@@ -26,6 +28,9 @@ interface Log {
   status: string;
   paid_amount?: number | null;
   payment_method?: string | null;
+  cell_id?: number | null;
+  cell_code?: string | null;
+  cell_status?: string | null;
 }
 
 interface PaymentQuote {
@@ -94,7 +99,7 @@ interface Subscription {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'users' | 'cells'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'users' | 'cells' | 'rates'>('dashboard');
   const [parkedVehicles, setParkedVehicles] = useState<Log[]>([]);
   const [history, setHistory] = useState<Log[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -127,6 +132,7 @@ export default function App() {
   const [monthlyPaymentMethod, setMonthlyPaymentMethod] = useState<'efectivo' | 'tarjeta' | 'transferencia' | 'qr'>('efectivo');
   const [subscriptionSearch, setSubscriptionSearch] = useState('');
   const [onlyActiveSubscriptions, setOnlyActiveSubscriptions] = useState(true);
+  const [entryError, setEntryError] = useState<string | null>(null);
 
   const formatCop = (value: number) =>
     new Intl.NumberFormat('es-CO', {
@@ -214,6 +220,11 @@ export default function App() {
     [cells]
   );
 
+  const reservedCellsCount = useMemo(
+    () => cells.filter((c) => c.status === 'reserved').length,
+    [cells]
+  );
+
   const filteredSubscriptions = useMemo(() => {
     const q = subscriptionSearch.trim().toUpperCase();
     return subscriptions.filter((s) => {
@@ -239,6 +250,7 @@ export default function App() {
     e.preventDefault();
     if (!plateInput) return;
     
+    setEntryError(null);
     try {
       const res = await fetch('/api/entry', {
         method: 'POST',
@@ -247,15 +259,24 @@ export default function App() {
       });
       
       if (res.ok) {
+        const data = await res.json();
         setPlateInput('');
         setEntryVehicleType('carro');
         fetchData();
+        // Mostrar confirmación con número de celda
+        if (data.cell_code) {
+          alert(`Ingreso registrado. Celda asignada: ${data.cell_code}`);
+        }
+      } else if (res.status === 507 || res.status === 403 || res.status === 409) {
+        const err = await res.json();
+        setEntryError(err.error);
       } else {
         const err = await res.json();
         alert(err.error);
       }
     } catch (error) {
       console.error('Entry error:', error);
+      setEntryError('Error al registrar la entrada');
     }
   };
 
@@ -541,6 +562,13 @@ export default function App() {
             <LayoutGrid size={20} />
             <span>Celdas</span>
           </button>
+          <button 
+            onClick={() => setActiveTab('rates')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'rates' ? 'bg-[#D9E2EC] text-[#243B53] font-bold' : 'hover:bg-blue-50 text-[#627D98]'}`}
+          >
+            <DollarSign size={20} />
+            <span>Tarifas</span>
+          </button>
         </div>
       </nav>
 
@@ -586,6 +614,30 @@ export default function App() {
                       <h3 className="text-lg font-bold text-[#243B53]">Registrar Entrada</h3>
                     </div>
                   </div>
+
+                  {entryError && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-red-50 border-2 border-red-300 rounded-2xl p-4 flex gap-3 items-start"
+                    >
+                      <div className="text-red-500 flex-shrink-0 mt-0.5">
+                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                      <div>
+                        <p className="font-bold text-red-900">{entryError}</p>
+                        <p className="text-sm text-red-700 mt-1">Valida el estado de la mensualidad o la disponibilidad de celdas</p>
+                      </div>
+                      <button
+                        onClick={() => setEntryError(null)}
+                        className="ml-auto text-red-500 hover:text-red-700 flex-shrink-0"
+                      >
+                        <X size={20} />
+                      </button>
+                    </motion.div>
+                  )}
                   
                   <form onSubmit={handleEntry} className="space-y-4">
                     <div className="relative">
@@ -719,8 +771,11 @@ export default function App() {
                       
                       <div className="mb-8">
                         <span className="text-3xl font-mono font-black text-[#102A43] tracking-tighter">{vehicle.plate}</span>
-                        <div className="mt-2">
+                        <div className="mt-2 flex gap-2">
                           <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase">{vehicle.vehicle_type || 'carro'}</span>
+                          {vehicle.cell_code && (
+                            <span className="px-2 py-0.5 bg-green-50 text-green-700 rounded-lg text-[10px] font-bold uppercase">Celda: {vehicle.cell_code}</span>
+                          )}
                         </div>
                         <div className="flex items-center gap-2 text-sm text-[#829AB1] mt-2">
                           <Clock size={14} />
@@ -769,6 +824,7 @@ export default function App() {
                     <tr className="bg-blue-50/50">
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Placa</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Tipo</th>
+                      <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Celda</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Valor pagado</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Entrada</th>
                       <th className="px-8 py-5 text-[10px] font-bold uppercase tracking-widest text-[#9FB3C8]">Salida</th>
@@ -780,6 +836,7 @@ export default function App() {
                       <tr key={log.id} className="hover:bg-blue-50/30 transition-colors">
                         <td className="px-8 py-5 font-mono font-bold text-[#243B53]">{log.plate}</td>
                         <td className="px-8 py-5 text-sm font-semibold capitalize text-[#486581]">{log.vehicle_type || 'carro'}</td>
+                        <td className="px-8 py-5 text-sm font-semibold text-[#243B53]">{log.cell_code ? <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold">{log.cell_code}</span> : '—'}</td>
                         <td className="px-8 py-5 text-sm font-bold text-[#243B53]">{log.paid_amount != null ? formatCop(log.paid_amount) : '—'}</td>
                         <td className="px-8 py-5 text-sm text-[#486581]">{new Date(log.entry_time).toLocaleString()}</td>
                         <td className="px-8 py-5 text-sm text-[#486581]">
@@ -919,6 +976,10 @@ export default function App() {
                     <p className="text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold">Celdas ocupadas</p>
                     <p className="text-2xl font-black text-[#102A43] mt-1">{occupiedCellsCount}</p>
                   </div>
+                  <div className="bg-[#F0F4F8] rounded-2xl px-5 py-4 min-w-[180px]">
+                    <p className="text-[10px] uppercase tracking-widest text-[#9FB3C8] font-bold">Celdas reservadas</p>
+                    <p className="text-2xl font-black text-[#102A43] mt-1">{reservedCellsCount}</p>
+                  </div>
                 </div>
 
                 <div>
@@ -976,6 +1037,7 @@ export default function App() {
                           <td className="px-6 py-4 font-mono font-bold text-[#243B53]">{s.cell_code || 'Sin asignar'}</td>
                           <td className="px-6 py-4">
                             {s.cell_status === 'occupied' && <span className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-bold uppercase">Ocupada</span>}
+                            {s.cell_status === 'reserved' && <span className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-[10px] font-bold uppercase">Reservada</span>}
                             {s.cell_status === 'available' && <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-bold uppercase">Disponible</span>}
                             {s.cell_status === 'maintenance' && <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-[10px] font-bold uppercase">Mantenimiento</span>}
                             {!s.cell_status && <span className="text-[#9FB3C8]">—</span>}
@@ -1114,6 +1176,7 @@ export default function App() {
                       <select value={editingCell.status} onChange={(e) => setEditingCell((c) => c ? { ...c, status: e.target.value } : null)} className="w-full bg-[#F0F4F8] border-none rounded-2xl px-4 py-3 focus:ring-2 focus:ring-emerald-200 outline-none text-[#243B53]">
                         <option value="available">Disponible</option>
                         <option value="occupied">Ocupada</option>
+                        <option value="reserved">Reservada</option>
                         <option value="maintenance">Mantenimiento</option>
                       </select>
                     </div>
@@ -1138,6 +1201,7 @@ export default function App() {
                           <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase">{(c.vehicle_type || 'todos')}</span>
                           {c.status === 'available' && <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-bold uppercase">Disponible</span>}
                           {c.status === 'occupied' && <span className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-bold uppercase">Ocupada</span>}
+                          {c.status === 'reserved' && <span className="px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-[10px] font-bold uppercase">Reservada</span>}
                           {c.status === 'maintenance' && <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-[10px] font-bold uppercase">Mantenimiento</span>}
                         </div>
                         {c.assigned_to_name && (
@@ -1158,6 +1222,19 @@ export default function App() {
                   </div>
                 )}
               </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'rates' && (
+            <motion.div
+              key="rates"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+              className="max-w-5xl mx-auto"
+            >
+              <RatesManager />
             </motion.div>
           )}
         </AnimatePresence>

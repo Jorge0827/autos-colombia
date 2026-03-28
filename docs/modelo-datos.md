@@ -35,7 +35,7 @@ Campos relevantes:
 - id
 - code
 - vehicle_type
-- status (`available` | `occupied` | `maintenance`)
+- status (`available` | `reserved` | `occupied` | `maintenance`)
 - created_at
 
 ### payments
@@ -92,3 +92,6 @@ Campos relevantes:
 - Salida requiere pago aprobado o mensualidad vigente.
 - Cotizacion: primera hora completa + fracciones de 15 minutos.
 - Tarifas por tipo de vehiculo configuradas en backend.
+- Celdas con mensualidad: `reserved` cuando el usuario no esta dentro, `occupied` cuando entra, y vuelve a `reserved` cuando sale.
+- Visitantes solo pueden ocupar celdas `available`.
+- Placas registradas solo pueden ingresar con mensualidad activa y usando su celda reservada.
