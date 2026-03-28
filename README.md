@@ -1,114 +1,104 @@
-# Autos Colombia - Sistema de gestion de parqueadero
+# Autos Colombia – Sistema de gestión de parqueadero
 
-Aplicacion web academica para administrar la operacion de un parqueadero.
+Este proyecto es una aplicación web para gestionar un parqueadero de manera sencilla.
 
-Incluye gestion de:
-- Entradas y salidas de vehiculos.
-- Usuarios.
-- Celdas.
-- Pagos simulados por estadia.
-- Mensualidades.
+Permite:
+- Registrar la **entrada** y **salida** de vehículos.
+- Consultar el **historial de movimientos** (entradas / salidas).
+- Gestionar **usuarios** y empleados del parqueadero.
+- Gestionar **celdas de parqueo** (código, tipo de vehículo permitido, estado).
+- Asignar una **celda** a cada usuario/vehículo.
 
-## Estado actual del flujo
+---
 
-### 1. Entrada de vehiculo
-- Se registra placa y tipo de vehiculo (carro, moto o bicicleta).
-- El vehiculo queda en estado `parked`.
+## Tecnologías utilizadas
 
-### 2. Cotizacion de salida
-- Antes de salir, se calcula el valor de parqueo.
-- Regla de cobro implementada:
-  - Primera hora completa.
-  - Despues de la primera hora, cobro por fraccion de 15 minutos.
-- Tarifas por hora:
-  - Carro: 7500
-  - Moto: 3500
-  - Bicicleta: 2000
+- **Frontend**
+  - React + TypeScript
+  - Vite
+  - Tailwind CSS
+  - motion (animaciones)
+  - lucide-react (iconos)
 
-### 3. Pago simulado
-- Se procesa pago con metodos simulados: efectivo, tarjeta, transferencia o QR.
-- Se genera comprobante interno con referencia (`SIM-...`).
-- Se muestra factura en ventana emergente para impresion.
+- **Backend**
+  - Node.js + Express
+  - SQLite (archivo `parking.db`)
+  - better-sqlite3
 
-### 4. Registro de salida
-- La salida se permite solo si existe pago aprobado o mensualidad activa.
+El frontend y el backend se ejecutan juntos en el mismo servidor Node (`server.ts`).
 
-### 5. Mensualidades
-- Se pueden activar mensualidades para usuarios con placa registrada.
-- Valores mensuales:
-  - Carro: 240000
-  - Moto: 132000
-  - Bicicleta: 60000
-- Se registra referencia de pago mensual (`SUB-...`).
+---
 
-### 6. Control operativo
-- Historial muestra valor pagado por movimiento.
-- En Usuarios existe panel de control de mensualidades con:
-  - Estado del plan.
-  - Vencimiento y dias restantes.
-  - Celda asignada y estado de la celda.
-  - Filtro de solo activas.
-  - Busqueda por placa.
+## Estructura general del proyecto
 
-## Tecnologias
-
-### Frontend
-- React + TypeScript
-- Vite
-- Tailwind CSS
-- motion
-- lucide-react
-
-### Backend
-- Node.js + Express
-- SQLite (`parking.db`)
-- better-sqlite3
-
-Frontend y backend se ejecutan en el mismo servidor definido en `server.ts`.
-
-## Estructura del proyecto
-
-- `server.ts`: API, reglas de negocio, migraciones SQLite.
+- `server.ts`: servidor Express, conexión a SQLite y API REST (`/api/entry`, `/api/exit`, `/api/users`, `/api/cells`, etc.).
 - `src/App.tsx`: interfaz principal (Dashboard, Historial, Usuarios, Celdas).
-- `src/main.tsx`: entrada React.
-- `src/index.css`: estilos base.
-- `parking.db`: base de datos local.
-- `docs/flujo-operativo.md`: flujo funcional actual de la aplicacion.
-- `docs/api-resumen.md`: resumen de endpoints disponibles.
-- `docs/modelo-datos.md`: tablas y campos principales en SQLite.
+- `src/main.tsx`: punto de entrada de React.
+- `src/index.css`: configuración de Tailwind y fuentes.
+- `parking.db`: base de datos SQLite donde se guardan logs, usuarios y celdas.
+- `docs/`: documentación adicional (requerimientos, historias de usuario, prompt de diseño, etc.).
 
-## Ejecucion local
+---
 
-### 1. Requisitos
-- Node.js 18 o superior.
+## Cómo ejecutar la aplicación (instrucciones para el profesor)
+
+### 1. Requisitos previos
+
+- Tener **Node.js** instalado (versión recomendada: 18 o superior).
+- No es necesario instalar SQLite por separado: el proyecto usa el archivo local `parking.db`.
 
 ### 2. Instalar dependencias
+
+Abra una terminal en la carpeta del proyecto (`autos-colombia`) y ejecute:
 
 ```bash
 npm install
 ```
 
-### 3. Ejecutar en desarrollo
+Este comando descargará todas las dependencias del frontend y del backend.
+
+### 3. Iniciar la aplicación en modo desarrollo
+
+En la misma carpeta, ejecute:
 
 ```bash
 npm run dev
 ```
 
-Servidor esperado:
+Este comando:
+- Arranca el servidor Node definido en `server.ts`.
+- Levanta Vite en modo middleware para servir el frontend.
+
+En la terminal debería aparecer un mensaje similar a:
 
 ```text
 Server running on http://localhost:3000
 ```
 
-### 4. Validar tipado
+### 4. Abrir la aplicación en el navegador
 
-```bash
-npm run lint
+1. Abrir un navegador web.
+2. Ir a la URL:
+
+```text
+http://localhost:3000
 ```
 
-## Notas
+Se mostrará la interfaz de **Autos Colombia** con:
+- Menú lateral (Dashboard, Historial, Usuarios, Celdas).
+- Dashboard para registrar entradas y salidas.
+- Historial de movimientos.
+- Módulo de usuarios.
+- Módulo de celdas.
 
-- La base `parking.db` se crea o migra automaticamente al iniciar.
-- Si se necesita iniciar desde cero, eliminar `parking.db` y volver a ejecutar `npm run dev`.
-- Proyecto orientado a uso academico con pagos simulados (sin dinero real).
+---
+
+## Notas adicionales
+
+- La base de datos `parking.db` se crea y migra automáticamente al arrancar el servidor.
+- Si se quiere empezar con una base completamente vacía, se puede borrar el archivo `parking.db` antes de ejecutar `npm run dev` (el sistema lo generará de nuevo).
+- El proyecto está pensado como ejemplo académico para mostrar:
+  - Manejo de operaciones CRUD en backend con SQLite.
+  - Consumo de una API REST desde React.
+  - Diseño de interfaz consistente usando Tailwind CSS.
 
